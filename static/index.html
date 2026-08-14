@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="referrer" content="no-referrer" />
+<title>RECON &lt;/Lanz_VibeCoder&gt;</title>
+<style>
+  :root{
+    --bg:#0b0f19; --bg2:#0e1424; --panel:rgba(17,24,39,.72);
+    --border:rgba(255,255,255,.07); --border2:rgba(16,185,129,.25);
+    --text:#e5e7eb; --muted:#7c869c; --emerald:#10b981; --cyan:#06b6d4;
+    --red:#ef4444; --amber:#f59e0b; --mono:'SF Mono',ui-monospace,'Cascadia Code',Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:var(--mono); background:var(--bg); color:var(--text);
+    min-height:100vh; font-size:14px; line-height:1.5;
+    background-image:radial-gradient(900px 500px at 80% -10%,rgba(16,185,129,.08),transparent),
+                     radial-gradient(700px 400px at -10% 110%,rgba(6,182,212,.07),transparent);
+  }
+  .app{display:grid;grid-template-columns:260px 1fr;min-height:100vh}
+  /* ---- sidebar ---- */
+  .sidebar{
+    background:linear-gradient(180deg,rgba(14,20,36,.9),rgba(11,15,25,.9));
+    border-right:1px solid var(--border); padding:22px 16px; display:flex;
+    flex-direction:column; gap:18px; position:sticky; top:0; height:100vh;
+  }
+  .brand{font-weight:700;font-size:15px;letter-spacing:.4px}
+  .brand .tag{color:var(--emerald)}
+  .brand small{display:block;color:var(--muted);font-weight:400;font-size:11px;margin-top:4px}
+  .nav{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+  .nav button{
+    display:flex;align-items:center;gap:10px;width:100%;text-align:left;cursor:pointer;
+    background:transparent;border:1px solid transparent;color:var(--muted);
+    padding:10px 12px;border-radius:10px;font-family:inherit;font-size:13px;transition:.15s;
+  }
+  .nav button:hover{color:var(--text);background:rgba(255,255,255,.03)}
+  .nav button.active{color:var(--emerald);background:rgba(16,185,129,.08);border-color:var(--border2)}
+  .nav .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+  .status{margin-top:auto;font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:8px}
+  .status .row{display:flex;align-items:center;gap:8px}
+  .pulse{width:8px;height:8px;border-radius:50%;background:var(--red)}
+  .pulse.on{background:var(--emerald);box-shadow:0 0 8px var(--emerald)}
+  /* ---- main ---- */
+  .main{padding:28px 34px;max-width:1100px;width:100%}
+  .head{margin-bottom:22px}
+  .head h1{font-size:20px;font-weight:700;letter-spacing:.3px}
+  .head p{color:var(--muted);font-size:12px;margin-top:4px}
+  .card{
+    background:var(--panel);border:1px solid var(--border);border-radius:16px;
+    padding:20px;backdrop-filter:blur(10px);box-shadow:0 20px 50px -30px rgba(0,0,0,.9);
+  }
+  .card + .card{margin-top:18px}
+  /* ---- input bar ---- */
+  .bar{display:flex;gap:12px;align-items:stretch;flex-wrap:wrap}
+  .bar .field{flex:1;min-width:240px;position:relative}
+  .bar input[type=text]{
+    width:100%;background:#070b14;border:1px solid var(--border);color:var(--text);
+    border-radius:12px;padding:14px 16px;font-family:inherit;font-size:14px;outline:none;transition:.15s;
+  }
+  .bar input[type=text]:focus{border-color:var(--emerald);box-shadow:0 0 0 3px rgba(16,185,129,.12)}
+  .btn{
+    border:none;cursor:pointer;border-radius:12px;padding:0 22px;font-family:inherit;
+    font-weight:700;font-size:13px;letter-spacing:.5px;color:#022;transition:.15s;white-space:nowrap;
+    background:linear-gradient(135deg,var(--cyan),#0891b2);box-shadow:0 8px 24px -10px var(--cyan);
+  }
+  .btn:hover{filter:brightness(1.08)}
+  .btn:disabled{opacity:.5;cursor:not-allowed;filter:grayscale(.4)}
+  .btn.ghost{background:transparent;border:1px solid var(--border);color:var(--muted);box-shadow:none;padding:10px 16px}
+  .btn.ghost:hover{color:var(--text);border-color:var(--emerald)}
+  .toggle{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;user-select:none;cursor:pointer}
+  .toggle input{accent-color:var(--emerald);width:15px;height:15px}
+  .hint{color:var(--muted);font-size:11px;margin-top:10px}
+  /* ---- progress / results ---- */
+  .job{margin-top:18px;display:none}
+  .job.show{display:block}
+  .prog{height:8px;background:#070b14;border-radius:99px;overflow:hidden;border:1px solid var(--border)}
+  .prog > i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--emerald),var(--cyan));transition:width .4s}
+  .meta{display:flex;gap:18px;flex-wrap:wrap;margin:12px 0;font-size:12px;color:var(--muted)}
+  .meta b{color:var(--text)}
+  .badge{padding:2px 9px;border-radius:99px;font-size:11px;border:1px solid var(--border)}
+  .badge.running{color:var(--amber);border-color:rgba(245,158,11,.4)}
+  .badge.completed{color:var(--emerald);border-color:var(--border2)}
+  .badge.failed{color:var(--red);border-color:rgba(239,68,68,.4)}
+  .badge.queued{color:var(--muted)}
+  pre.out{
+    background:#060a12;border:1px solid var(--border);border-radius:12px;padding:14px;
+    max-height:320px;overflow:auto;font-size:12.5px;color:#9be7c4;white-space:pre-wrap;word-break:break-all;
+  }
+  /* ---- files table ---- */
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+  td .fn{color:var(--emerald)}
+  tr:hover td{background:rgba(255,255,255,.02)}
+  .empty{color:var(--muted);text-align:center;padding:34px;font-size:13px}
+  .icon-btn{background:transparent;border:1px solid var(--border);color:var(--muted);
+    border-radius:8px;padding:6px 12px;cursor:pointer;font-family:inherit;font-size:12px;transition:.15s}
+  .icon-btn:hover{color:var(--emerald);border-color:var(--border2)}
+  .icon-btn.danger:hover{color:var(--red);border-color:rgba(239,68,68,.4)}
+  /* ---- login overlay ---- */
+  .overlay{position:fixed;inset:0;background:rgba(5,8,14,.92);backdrop-filter:blur(6px);
+    display:flex;align-items:center;justify-content:center;z-index:50}
+  .overlay.hidden{display:none}
+  .login{width:340px;background:var(--panel);border:1px solid var(--border2);border-radius:18px;padding:28px}
+  .login h2{font-size:16px;margin-bottom:4px}
+  .login p{color:var(--muted);font-size:12px;margin-bottom:18px}
+  .login label{display:block;font-size:11px;color:var(--muted);margin:12px 0 6px}
+  .login input{width:100%;background:#070b14;border:1px solid var(--border);color:var(--text);
+    border-radius:10px;padding:11px 13px;font-family:inherit;outline:none}
+  .login input:focus{border-color:var(--emerald)}
+  .login .btn{width:100%;margin-top:20px;padding:13px}
+  .err{color:var(--red);font-size:12px;margin-top:12px;min-height:16px}
+  .view{display:none}.view.active{display:block}
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:#1b2436;border-radius:9px}
+</style>
+</head>
+<body>
+<!-- ================= LOGIN GATE ================= -->
+<div class="overlay" id="overlay">
+  <div class="login">
+    <h2>RECON <span style="color:var(--emerald)">&lt;/Lanz_VibeCoder&gt;</span></h2>
+    <p>Authenticate to access the console.</p>
+    <label>USERNAME</label>
+    <input type="text" id="lg-user" autocomplete="username" spellcheck="false" />
+    <label>PASSWORD</label>
+    <input type="password" id="lg-pass" autocomplete="current-password"
+           onkeydown="if(event.key==='Enter')doLogin()" />
+    <button class="btn" onclick="doLogin()">AUTHENTICATE</button>
+    <div class="err" id="lg-err"></div>
+  </div>
+</div>
+
+<!-- ================= APP ================= -->
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">RECON <span class="tag">&lt;/Lanz_VibeCoder&gt;</span>
+      <small>reverse ip intelligence</small>
+    </div>
+    <nav class="nav">
+      <button class="active" data-view="recon" onclick="switchView('recon')">
+        <span class="dot"></span> Reverse IP</button>
+      <button data-view="files" onclick="switchView('files')">
+        <span class="dot"></span> Saved Files</button>
+    </nav>
+    <div class="status">
+      <div class="row"><span class="pulse" id="api-pulse"></span><span id="api-state">connecting…</span></div>
+      <div class="row">user: <b id="who">—</b></div>
+      <div class="row"><button class="btn ghost" style="width:100%" onclick="logout()">LOGOUT</button></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- ---- Reverse IP view ---- -->
+    <section class="view active" id="view-recon">
+      <div class="head"><h1>Reverse IP Lookup</h1>
+        <p>CIDR range, single IP, or domain — resolved asynchronously to hostnames.</p></div>
+      <div class="card">
+        <div class="bar">
+          <div class="field">
+            <input type="text" id="target" placeholder="IP or Domain..."
+                   spellcheck="false" onkeydown="if(event.key==='Enter')runScan()" />
+          </div>
+          <label class="toggle"><input type="checkbox" id="ext" /> external API</label>
+          <button class="btn" id="run" onclick="runScan()">RUN ANALYSIS</button>
+        </div>
+        <div class="hint">e.g. <b>192.168.1.0/24</b> · <b>8.8.8.8</b> · <b>example.com</b></div>
+        <div class="job" id="job">
+          <div class="meta">
+            <span>status <span class="badge" id="j-status">—</span></span>
+            <span>target <b id="j-target">—</b></span>
+            <span>scanned <b id="j-prog">0 / 0</b></span>
+            <span>hostnames <b id="j-found">0</b></span>
+          </div>
+          <div class="prog"><i id="j-bar"></i></div>
+          <pre class="out" id="j-out" style="margin-top:14px">// results will stream here…</pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---- Saved Files view ---- -->
+    <section class="view" id="view-files">
+      <div class="head"><h1>Saved Files</h1>
+        <p>Result files stored on the server. Click a name to download.</p></div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <span style="color:var(--muted);font-size:12px" id="files-count">—</span>
+          <button class="btn ghost" onclick="loadFiles()">↻ REFRESH</button>
+        </div>
+        <div id="files-wrap"></div>
+      </div>
+    </section>
+  </main>
+</div>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let AUTH = sessionStorage.getItem("recon_auth") || "";
+let POLL = null;
+
+function b64(user, pass){ return btoa(unescape(encodeURIComponent(user + ":" + pass))); }
+function esc(s){ return String(s).replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+// ---- authenticated fetch wrapper ----
+async function api(path, opts = {}){
+  const headers = Object.assign({}, opts.headers || {}, { "Authorization": "Basic " + AUTH });
+  if (opts.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  if (res.status === 401){ forceLogin("Session expired or invalid credentials."); throw new Error("unauthorized"); }
+  return res;
+}
+
+// ---- login / logout ----
+async function doLogin(){
+  const u = $("lg-user").value.trim(), p = $("lg-pass").value;
+  if (!u || !p){ $("lg-err").textContent = "Enter username and password."; return; }
+  AUTH = b64(u, p);
+  try {
+    const res = await fetch("/api/files", { headers: { "Authorization": "Basic " + AUTH } });
+    if (res.status === 401){ $("lg-err").textContent = "Invalid credentials."; AUTH = ""; return; }
+    if (!res.ok){ $("lg-err").textContent = "Server error (" + res.status + ")."; AUTH = ""; return; }
+    sessionStorage.setItem("recon_auth", AUTH);
+    $("who").textContent = u;
+    $("overlay").classList.add("hidden");
+    $("lg-pass").value = "";
+    checkApi(); loadFiles();
+  } catch(e){ $("lg-err").textContent = "Cannot reach server."; AUTH = ""; }
+}
+function forceLogin(msg){
+  AUTH = ""; sessionStorage.removeItem("recon_auth");
+  $("overlay").classList.remove("hidden");
+  if (msg) $("lg-err").textContent = msg;
+}
+function logout(){ if (POLL) clearInterval(POLL); forceLogin(""); }
+// ---- view switching ----
+function switchView(name){
+  document.querySelectorAll(".nav button").forEach(b =>
+    b.classList.toggle("active", b.dataset.view === name));
+  $("view-recon").classList.toggle("active", name === "recon");
+  $("view-files").classList.toggle("active", name === "files");
+  if (name === "files") loadFiles();
+}
+
+// ---- health indicator ----
+async function checkApi(){
+  try {
+    const r = await fetch("/api/health");
+    const ok = r.ok;
+    $("api-pulse").classList.toggle("on", ok);
+    $("api-state").textContent = ok ? "engine online" : "engine down";
+  } catch(e){
+    $("api-pulse").classList.remove("on");
+    $("api-state").textContent = "engine unreachable";
+  }
+}
+
+// ---- run a scan ----
+async function runScan(){
+  const target = $("target").value.trim();
+  if (!target){ $("target").focus(); return; }
+  const ext = $("ext").checked;
+  $("run").disabled = true; $("run").textContent = "DISPATCHING…";
+  try {
+    const res = await api("/api/scan", { method: "POST",
+      body: JSON.stringify({ target, external_api: ext }) });
+    if (res.status === 422){ alert("Invalid target. Use a CIDR, IP, or domain."); return; }
+    if (!res.ok){ alert("Failed to start scan (" + res.status + ")."); return; }
+    const job = await res.json();
+    $("job").classList.add("show");
+    $("j-out").textContent = "// scanning " + target + " …";
+    if (POLL) clearInterval(POLL);
+    renderJob(job);
+    POLL = setInterval(() => pollJob(job.job_id), 1500);
+    pollJob(job.job_id);
+  } catch(e){ /* 401 already handled */ }
+  finally { $("run").disabled = false; $("run").textContent = "RUN ANALYSIS"; }
+}
+
+async function pollJob(id){
+  try {
+    const res = await api("/api/scan/" + id);
+    if (!res.ok) return;
+    const job = await res.json();
+    renderJob(job);
+    if (job.status === "completed" || job.status === "failed"){
+      clearInterval(POLL); POLL = null;
+      if (job.status === "completed" && job.filename) previewFile(job.filename, job.found);
+      else if (job.status === "failed") $("j-out").textContent = "// ERROR: " + (job.error || "scan failed");
+    }
+  } catch(e){ clearInterval(POLL); }
+}
+function renderJob(job){
+  $("j-target").textContent = job.target;
+  $("j-prog").textContent = job.processed + " / " + job.total;
+  $("j-found").textContent = job.found;
+  $("j-bar").style.width = (job.progress || 0) + "%";
+  const b = $("j-status");
+  b.textContent = job.status;
+  b.className = "badge " + job.status;
+}
+
+async function previewFile(name, found){
+  try {
+    const res = await api("/api/files/" + encodeURIComponent(name) + "/download");
+    if (!res.ok){ $("j-out").textContent = "// scan complete — " + found + " hostname(s)"; return; }
+    const text = await res.text();
+    $("j-out").textContent = text.trim()
+      ? text
+      : "// scan complete — 0 hostnames found for this target";
+  } catch(e){}
+}
+
+// ---- saved files ----
+async function loadFiles(){
+  const wrap = $("files-wrap");
+  try {
+    const res = await api("/api/files");
+    if (!res.ok){ wrap.innerHTML = '<div class="empty">Failed to load files.</div>'; return; }
+    const data = await res.json();
+    const files = data.files || [];
+    $("files-count").textContent = files.length + " file(s)";
+    if (!files.length){ wrap.innerHTML = '<div class="empty">No result files yet. Run a scan to generate one.</div>'; return; }
+    let rows = files.map(f => `
+      <tr>
+        <td><span class="fn">${esc(f.name)}</span></td>
+        <td>${f.lines}</td>
+        <td>${(f.size/1024).toFixed(1)} KB</td>
+        <td>${esc(f.modified.replace("T"," ").slice(0,19))} UTC</td>
+        <td style="text-align:right;white-space:nowrap">
+          <button class="icon-btn" onclick="downloadFile('${esc(f.name)}')">↓ download</button>
+          <button class="icon-btn danger" onclick="deleteFile('${esc(f.name)}')">✕</button>
+        </td>
+      </tr>`).join("");
+    wrap.innerHTML = `<table><thead><tr>
+      <th>Filename</th><th>Hosts</th><th>Size</th><th>Modified</th><th></th>
+      </tr></thead><tbody>${rows}</tbody></table>`;
+  } catch(e){ wrap.innerHTML = '<div class="empty">Failed to load files.</div>'; }
+}
+
+async function downloadFile(name){
+  try {
+    const res = await api("/api/files/" + encodeURIComponent(name) + "/download");
+    if (!res.ok){ alert("Download failed."); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name; document.body.appendChild(a); a.click();
+    a.remove(); URL.revokeObjectURL(url);
+  } catch(e){}
+}
+
+async function deleteFile(name){
+  if (!confirm("Delete " + name + "?")) return;
+  try { const res = await api("/api/files/" + encodeURIComponent(name), { method: "DELETE" });
+    if (res.ok) loadFiles(); else alert("Delete failed."); } catch(e){}
+}
+
+// ---- boot ----
+(async function init(){
+  checkApi(); setInterval(checkApi, 15000);
+  if (!AUTH){ forceLogin(""); return; }
+  const res = await fetch("/api/files", { headers: { "Authorization": "Basic " + AUTH } });
+  if (res.ok){
+    $("overlay").classList.add("hidden");
+    try { $("who").textContent = atob(AUTH).split(":")[0]; } catch(e){}
+    loadFiles();
+  } else { forceLogin(""); }
+})();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,18 @@
+# Python virtualenv (rebuilt on the VPS by deploy.sh)
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Local secrets / runtime config — NEVER commit real credentials
+.env
+
+# Scan output
+results/
+*.tmp
+
+# Editor / OS cruft
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
