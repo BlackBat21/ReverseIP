@@ -3,9 +3,11 @@
 RECON </Lanz_VibeCoder> - Reverse IP Lookup service.
 
 A lightweight, single-process FastAPI application that performs reverse IP
-lookups (PTR records + optional shared-hosting API fallback) across a CIDR
-range, a single IP, or a domain. Scans run asynchronously in the background;
-results are written as flat, deduplicated hostname lists under RESULTS_DIR.
+lookups across a CIDR range, a single IP, or a domain. It merges up to four
+sources per IP: the intercode.info "at same IP" shared-hosting tool (primary),
+PTR (reverse DNS), TLS-certificate SAN/CN harvesting, and an optional
+third-party API fallback. Scans run asynchronously in the background; results
+are written as flat, deduplicated hostname lists under RESULTS_DIR.
 
 Designed for a 1 GB / low-memory Ubuntu VPS:
   * no Redis / Celery / database - asyncio + in-memory job table + flat files
@@ -94,6 +96,21 @@ TLS_CERT_PORTS = [int(p) for p in _env("RECON_TLS_CERT_PORTS", "443").split(",")
                   if p.strip().isdigit()]
 TLS_CERT_TIMEOUT = float(_env("RECON_TLS_CERT_TIMEOUT", "4.0"))
 TLS_CERT_CONCURRENCY = int(_env("RECON_TLS_CERT_CONCURRENCY", str(DNS_CONCURRENCY)))
+
+# PRIMARY reverse-IP source: the intercode.info "at same IP" shared-hosting tool
+# (https://intercode.info/webtools/atsameip/). It is a third-party HTML page (no
+# API key, no signup) that returns the domains co-hosted on an IP. We query it
+# WITHOUT the "sia" flag and read ONLY the same-IP `<a class="domain">` results;
+# the flag's extra "sites on IP-addresses nearby" section lists domains on OTHER
+# IPs (false positives), so we drop it. This is on by default because it gives
+# far richer shared-hosting coverage than PTR/TLS-cert alone — but it IS a
+# third-party page: fragile to markup changes and subject to the site's terms /
+# rate limits, so concurrency is kept deliberately low to stay polite.
+ENABLE_ATSAMEIP = _env("RECON_ENABLE_ATSAMEIP", "true").lower() in ("1", "true", "yes")
+ATSAMEIP_URL = _env("RECON_ATSAMEIP_URL", "https://intercode.info/webtools/atsameip/?q={ip}")
+ATSAMEIP_TIMEOUT = float(_env("RECON_ATSAMEIP_TIMEOUT", "15.0"))
+ATSAMEIP_CONCURRENCY = int(_env("RECON_ATSAMEIP_CONCURRENCY", "2"))
+ATSAMEIP_CACHE_MAX = int(_env("RECON_ATSAMEIP_CACHE_MAX", "2000"))
 
 MAX_INPUT_LEN = 255
 MAX_JOBS_RETAINED = 200  # trim the in-memory job table to bound memory
@@ -230,15 +247,20 @@ def _looks_rate_limited(resp) -> bool:
     return False
 
 
-def _cache_put(ip: str, found: set[str]) -> None:
-    """Store a per-IP result, trimming oldest entries (dicts keep insertion order)."""
-    if not EXTERNAL_API_CACHE_MAX:
+def _bounded_put(cache: dict[str, set[str]], key: str, found: set[str], maxsize: int) -> None:
+    """Store a per-IP result in `cache`, trimming oldest entries (FIFO by insertion)."""
+    if not maxsize:
         return
-    _EXT_CACHE[ip] = set(found)
-    overflow = len(_EXT_CACHE) - EXTERNAL_API_CACHE_MAX
+    cache[key] = set(found)
+    overflow = len(cache) - maxsize
     if overflow > 0:
-        for k in list(_EXT_CACHE.keys())[:overflow]:
-            _EXT_CACHE.pop(k, None)
+        for k in list(cache.keys())[:overflow]:
+            cache.pop(k, None)
+
+
+def _cache_put(ip: str, found: set[str]) -> None:
+    """Cache an external-API per-IP result (see _bounded_put)."""
+    _bounded_put(_EXT_CACHE, ip, found, EXTERNAL_API_CACHE_MAX)
 
 
 async def external_lookup(ip: str, client, sem: asyncio.Semaphore) -> set[str]:
@@ -271,6 +293,89 @@ async def external_lookup(ip: str, client, sem: asyncio.Semaphore) -> set[str]:
             if h:
                 found.add(h)
         _cache_put(ip, found)  # cache even an empty result to avoid re-querying
+    return found
+
+# --------------------------------------------------------------------------- #
+# PRIMARY source: intercode.info "at same IP" shared-hosting lookup (HTML scrape)
+#
+# This third-party page returns the domains co-hosted on an IP far more richly
+# than PTR or a bare TLS-cert grab. It needs no API key. We fetch it with a
+# browser-like User-Agent, then extract ONLY the same-IP `<a class="domain">`
+# anchors, cutting the page at the "sites on IP-addresses nearby" heading so the
+# neighbour-IP domains listed below it (false positives) are never included.
+# --------------------------------------------------------------------------- #
+_ATS_CACHE: dict[str, set[str]] = {}
+_ATS_BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+# Same-IP results are <a ... class="domain" ...>NAME</a>; grab the whole tag so
+# we can prefer the full host from href and fall back to the visible text.
+_ATS_ANCHOR_RE = re.compile(r'<a\b([^>]*class="domain"[^>]*)>(.*?)</a>', re.I | re.S)
+_ATS_HREF_RE = re.compile(r'href="https?://([^"/]+)', re.I)
+_ATS_TAG_RE = re.compile(r"<[^>]+>")
+
+
+class AtsameipBlocked(Exception):
+    """Raised when intercode.info blocks or rate-limits our requests."""
+
+
+def _names_from_atsameip_html(html: str) -> set[str]:
+    """Extract same-IP hostnames from an intercode.info atsameip result page."""
+    names: set[str] = set()
+    if not html:
+        return names
+    # Drop the "nearby IP-addresses" section: everything below that heading is
+    # co-hosted on OTHER IPs and would be a false positive for this target.
+    cut = re.search(r"sites on IP-addresses nearby", html, re.I)
+    if cut:
+        html = html[: cut.start()]
+    for attrs, inner in _ATS_ANCHOR_RE.findall(html):
+        m = _ATS_HREF_RE.search(attrs)
+        host = m.group(1) if m else _ATS_TAG_RE.sub("", inner)  # strip inner tags
+        h = clean_hostname(host)
+        if h:
+            names.add(h)
+    return names
+
+
+def _ats_looks_blocked(resp) -> bool:
+    """Heuristic block/anti-bot detection (challenge page returned with HTTP 200)."""
+    if resp.status_code in (403, 429):
+        return True
+    if resp.status_code == 200:
+        low = resp.text[:4000].lower()
+        for marker in ("captcha", "unusual traffic", "access denied",
+                       "too many requests", "rate limit exceeded"):
+            if marker in low:
+                return True
+    return False
+
+
+async def atsameip_lookup(ip: str, client, sem: asyncio.Semaphore) -> set[str]:
+    """Query intercode.info for domains co-hosted on `ip`.
+
+    Raises AtsameipBlocked when the site refuses us (429/403/challenge) so the
+    caller can stop firing further doomed requests. Results are cached per-IP so
+    repeat scans reuse them without re-fetching.
+    """
+    found: set[str] = set()
+    if client is None:
+        return found
+    if ATSAMEIP_CACHE_MAX and ip in _ATS_CACHE:
+        return set(_ATS_CACHE[ip])  # cache hit: no request
+    url = ATSAMEIP_URL.format(ip=ip)
+    async with sem:
+        try:
+            resp = await client.get(
+                url, timeout=ATSAMEIP_TIMEOUT,
+                headers={"User-Agent": _ATS_BROWSER_UA},
+            )
+        except Exception:
+            return found  # transient network error: non-fatal, no data
+    if _ats_looks_blocked(resp):
+        raise AtsameipBlocked()
+    if resp.status_code == 200:
+        found = _names_from_atsameip_html(resp.text)
+        _bounded_put(_ATS_CACHE, ip, found, ATSAMEIP_CACHE_MAX)
     return found
 
 # --------------------------------------------------------------------------- #
@@ -445,7 +550,7 @@ async def run_scan(job: Job) -> None:
                 raise ValueError("domain did not resolve to any IP address")
         job.total = len(ips)
 
-        if job.use_external and httpx is not None:
+        if (job.use_external or ENABLE_ATSAMEIP) and httpx is not None:
             client = httpx.AsyncClient(
                 timeout=EXTERNAL_API_TIMEOUT,
                 headers={"User-Agent": "recon-reverse-ip/1.0"},
@@ -453,15 +558,17 @@ async def run_scan(job: Job) -> None:
             )
         ext_sem = asyncio.Semaphore(EXTERNAL_API_CONCURRENCY)
         cert_sem = asyncio.Semaphore(max(1, TLS_CERT_CONCURRENCY))
+        ats_sem = asyncio.Semaphore(max(1, ATSAMEIP_CONCURRENCY))
 
         queue: asyncio.Queue[str] = asyncio.Queue()
         for ip in ips:
             queue.put_nowait(ip)
 
         rate_limited = False  # set once the external API reports quota exhausted
+        ats_blocked = False   # set once intercode.info refuses/rate-limits us
 
         async def worker() -> None:
-            nonlocal rate_limited
+            nonlocal rate_limited, ats_blocked
             while True:
                 try:
                     ip = queue.get_nowait()
@@ -469,6 +576,12 @@ async def run_scan(job: Job) -> None:
                     return
                 try:
                     hs = await ptr_lookup(ip, resolver)
+                    if ENABLE_ATSAMEIP and client is not None and not ats_blocked:
+                        # PRIMARY source: shared-hosting domains co-located on IP.
+                        try:
+                            hs |= await atsameip_lookup(ip, client, ats_sem)
+                        except AtsameipBlocked:
+                            ats_blocked = True
                     if job.use_external and client is not None and not rate_limited:
                         try:
                             hs |= await external_lookup(ip, client, ext_sem)
@@ -488,13 +601,22 @@ async def run_scan(job: Job) -> None:
         pool = min(DNS_CONCURRENCY, max(1, len(ips)))
         await asyncio.gather(*(worker() for _ in range(pool)))
 
+        warnings: list[str] = []
+        if ats_blocked:
+            warnings.append(
+                "Primary source intercode.info blocked or rate-limited our requests, "
+                "so shared-hosting results may be incomplete. PTR (DNS) and TLS-"
+                "certificate results are unaffected."
+            )
         if rate_limited:
-            job.warning = (
+            warnings.append(
                 "External reverse-IP API rate limit reached — the free tier allows "
                 "only ~50 lookups/day, so results are incomplete. PTR (DNS) results "
                 "are unaffected. Add an API key/membership, scan a smaller range, or "
                 "disable the external API for accurate repeat scans."
             )
+        if warnings:
+            job.warning = "  ".join(warnings)
 
         job.filename = write_results(job.target, results)
         job.found = len(results)

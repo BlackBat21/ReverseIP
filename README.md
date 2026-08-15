@@ -1,11 +1,12 @@
 # RECON &mdash; Reverse IP Lookup
 
 A lightweight, single-process **FastAPI** service that performs reverse IP lookups
-across a **CIDR range**, a **single IP**, or a **domain**. It combines two
-**API-free, unlimited** sources — **PTR** (reverse DNS) records and **TLS
-certificate** hostnames read straight off each host (SAN/CN) — plus an
-**optional** third-party shared-hosting API. Scans run asynchronously in the
-background and results are written as flat, deduplicated hostname lists.
+across a **CIDR range**, a **single IP**, or a **domain**. It merges several
+sources per IP: the **intercode.info "at same IP"** shared-hosting lookup
+(**primary**, no API key), **PTR** (reverse DNS) records, **TLS certificate**
+hostnames read straight off each host (SAN/CN), and an **optional** third-party
+shared-hosting API. Scans run asynchronously in the background and results are
+written as flat, deduplicated hostname lists.
 
 Designed to run comfortably on a **1 GB / low-memory Ubuntu VPS**:
 
@@ -18,22 +19,33 @@ Designed to run comfortably on a **1 GB / low-memory Ubuntu VPS**:
 
 ## How it finds hostnames
 
-Each IP is checked against up to three sources; results are merged and deduplicated:
+Each IP is checked against up to four sources; results are merged and deduplicated:
 
-1. **PTR / reverse DNS** — unlimited, no API. Often only one hostname per IP, and
+1. **intercode.info "at same IP"** *(primary, on by default)* — a third-party
+   shared-hosting web tool (no API key) that lists the domains co-hosted on an IP.
+   This gives far richer coverage than PTR/TLS alone. The app queries it **without**
+   the `sia` flag and reads **only** the same-IP results, deliberately dropping the
+   tool's *"sites on IP-addresses nearby"* section (those domains live on **other**
+   IPs and would be false positives). Because it is a third-party page it is subject
+   to that site's terms and rate limits; if the site blocks us the scan surfaces a
+   warning rather than silently reporting `0`.
+2. **PTR / reverse DNS** — unlimited, no API. Often only one hostname per IP, and
    typically none on CDNs (e.g. Cloudflare), so `0` there can be correct.
-2. **TLS certificate (SAN/CN)** — unlimited, no API, **on by default**. Connects to
+3. **TLS certificate (SAN/CN)** — unlimited, no API, **on by default**. Connects to
    the IP's TLS port(s) and reads the hostnames the certificate is issued for,
    surfacing real site names even when PTR is empty. Because no SNI is sent, an
    SNI-based shared host returns only its *default* cert (partial coverage), and
    CDN/WAF IPs return an edge cert — but every name it returns is real.
-3. **External shared-hosting API** *(optional, off by default)* — a third-party
+4. **External shared-hosting API** *(optional, off by default)* — a third-party
    service whose free tier is capped at ~50 lookups/day (see troubleshooting below).
 
-A regression/behaviour test for the TLS-certificate path lives in
-[test_cert.py](test_cert.py) (offline DER parse + a live local TLS handshake):
+Regression/behaviour tests live alongside the app — the primary intercode.info
+parser in [test_atsameip.py](test_atsameip.py) (fully offline HTML fixtures) and
+the TLS-certificate path in [test_cert.py](test_cert.py) (offline DER parse + a
+live local TLS handshake):
 
 ```bash
+python test_atsameip.py
 python test_cert.py
 ```
 
@@ -130,6 +142,8 @@ systemd unit). See [.env.example](.env.example) for the full list. Common ones:
 | `RECON_MAX_HOSTS` | `65536` | Hard cap on hosts per scan (protects small VPS) |
 | `RECON_DNS_CONCURRENCY` | `50` | Fixed DNS worker-pool size |
 | `RECON_NAMESERVERS` | *(system)* | Comma-separated custom resolvers |
+| `RECON_ENABLE_ATSAMEIP` | `true` | Primary intercode.info shared-hosting lookup |
+| `RECON_ATSAMEIP_URL` | *(intercode.info)* | Override the atsameip endpoint (`{ip}` placeholder) |
 | `RECON_ENABLE_TLS_CERT` | `true` | API-free TLS-certificate hostname discovery (per IP) |
 | `RECON_TLS_CERT_PORTS` | `443` | Comma-separated TLS ports to probe (e.g. `443,8443,993`) |
 | `RECON_ENABLE_EXTERNAL_API` | `false` | Enable third-party shared-hosting fallback |
