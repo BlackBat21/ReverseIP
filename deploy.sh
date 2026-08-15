@@ -71,6 +71,13 @@ apt-get install -y git python3 python3-venv python3-pip openssl
 
 echo "[*] Fetching application from $REPO_URL ($BRANCH) ..."
 mkdir -p "$APP_DIR"
+# Git 2.35.2+ refuses to operate on a repo owned by another user. After the
+# first install $BUILD_DIR is owned by the service account, but this script
+# runs git as root - so mark it safe (idempotently) before touching it.
+if [[ -d "$BUILD_DIR/.git" ]] \
+   && ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$BUILD_DIR"; then
+  git config --global --add safe.directory "$BUILD_DIR"
+fi
 if [[ -d "$BUILD_DIR/.git" ]]; then
   git -C "$BUILD_DIR" remote set-url origin "$REPO_URL"
   git -C "$BUILD_DIR" fetch --depth 1 origin "$BRANCH"
