@@ -166,7 +166,8 @@
           <label class="toggle"><input type="checkbox" id="ext" /> external API</label>
           <button class="btn" id="run" onclick="runScan()">RUN ANALYSIS</button>
         </div>
-        <div class="hint">e.g. <b>192.168.1.0/24</b> · <b>8.8.8.8</b> · <b>example.com</b></div>
+        <div class="hint">e.g. <b>192.168.1.0/24</b> · <b>8.8.8.8</b> · <b>example.com</b><br>
+          <b>external API</b> uses a free third-party service capped at ~50 lookups/day — enough for a few IPs, not a whole /24. PTR (default) is unlimited.</div>
         <div class="job" id="job">
           <div class="meta">
             <span>status <span class="badge" id="j-status">—</span></span>
@@ -287,7 +288,7 @@ async function pollJob(id){
     renderJob(job);
     if (job.status === "completed" || job.status === "failed"){
       clearInterval(POLL); POLL = null;
-      if (job.status === "completed" && job.filename) previewFile(job.filename, job.found);
+      if (job.status === "completed" && job.filename) previewFile(job.filename, job.found, job.warning);
       else if (job.status === "failed") $("j-out").textContent = "// ERROR: " + (job.error || "scan failed");
     }
   } catch(e){ clearInterval(POLL); }
@@ -302,14 +303,15 @@ function renderJob(job){
   b.className = "badge " + job.status;
 }
 
-async function previewFile(name, found){
+async function previewFile(name, found, warning){
+  const warn = warning ? "// ⚠ " + warning + "\n\n" : "";
   try {
     const res = await api("/api/files/" + encodeURIComponent(name) + "/download");
-    if (!res.ok){ $("j-out").textContent = "// scan complete — " + found + " hostname(s)"; return; }
+    if (!res.ok){ $("j-out").textContent = warn + "// scan complete — " + found + " hostname(s)"; return; }
     const text = await res.text();
-    $("j-out").textContent = text.trim()
+    $("j-out").textContent = warn + (text.trim()
       ? text
-      : "// scan complete — 0 hostnames found for this target";
+      : "// scan complete — 0 hostnames found for this target");
   } catch(e){}
 }
 

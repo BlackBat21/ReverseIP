@@ -69,6 +69,10 @@ EXTERNAL_API_URL = _env(
 )
 EXTERNAL_API_TIMEOUT = float(_env("RECON_EXTERNAL_API_TIMEOUT", "10.0"))
 EXTERNAL_API_CONCURRENCY = int(_env("RECON_EXTERNAL_API_CONCURRENCY", "3"))
+# Bounded in-memory cache of external-API results, keyed by IP. Reverse-IP data
+# is stable minute-to-minute, so caching lets a repeat scan reuse results
+# WITHOUT spending more of the tiny free-tier daily quota. 0 disables it.
+EXTERNAL_API_CACHE_MAX = int(_env("RECON_EXTERNAL_API_CACHE_MAX", "2000"))
 
 MAX_INPUT_LEN = 255
 MAX_JOBS_RETAINED = 200  # trim the in-memory job table to bound memory
@@ -183,26 +187,69 @@ async def ptr_lookup(ip: str, resolver) -> set[str]:
     return found
 
 
+# Bounded in-memory cache of external-API results, keyed by IP.
+_EXT_CACHE: dict[str, set[str]] = {}
+
+
+class ExternalRateLimited(Exception):
+    """Raised when the third-party reverse-IP API reports its quota is exhausted."""
+
+
+def _looks_rate_limited(resp) -> bool:
+    """Detect a rate-limit / quota response.
+
+    hackertarget (and similar free APIs) return HTTP 200 with a plain-text body
+    like 'API count exceeded - Increase Your Query Limits with a Membership: ...'
+    once the ~50-lookups/day free quota is spent; some return HTTP 429.
+    """
+    if resp.status_code == 429:
+        return True
+    if resp.status_code == 200 and "api count exceeded" in resp.text.lower():
+        return True
+    return False
+
+
+def _cache_put(ip: str, found: set[str]) -> None:
+    """Store a per-IP result, trimming oldest entries (dicts keep insertion order)."""
+    if not EXTERNAL_API_CACHE_MAX:
+        return
+    _EXT_CACHE[ip] = set(found)
+    overflow = len(_EXT_CACHE) - EXTERNAL_API_CACHE_MAX
+    if overflow > 0:
+        for k in list(_EXT_CACHE.keys())[:overflow]:
+            _EXT_CACHE.pop(k, None)
+
+
 async def external_lookup(ip: str, client, sem: asyncio.Semaphore) -> set[str]:
-    """Optional shared-hosting lookup via a third-party reverse-IP API."""
+    """Optional shared-hosting lookup via a third-party reverse-IP API.
+
+    Raises ExternalRateLimited when the API signals the quota is exhausted so
+    the caller can stop firing further (doomed) requests. Successful results
+    are cached per-IP so repeat scans reuse them without spending more quota.
+    """
     found: set[str] = set()
     if client is None:
         return found
+    if EXTERNAL_API_CACHE_MAX and ip in _EXT_CACHE:
+        return set(_EXT_CACHE[ip])  # cache hit: no API call, no quota spent
     url = EXTERNAL_API_URL.format(ip=ip)
     async with sem:
         try:
             resp = await client.get(url)
-            if resp.status_code == 200:
-                for line in resp.text.splitlines():
-                    line = line.strip()
-                    low = line.lower()
-                    if not line or "error" in low or "api count exceeded" in low:
-                        continue
-                    h = clean_hostname(line)
-                    if h:
-                        found.add(h)
         except Exception:
-            pass
+            return found  # transient network error: treat as no data (non-fatal)
+    if _looks_rate_limited(resp):
+        raise ExternalRateLimited()
+    if resp.status_code == 200:
+        for line in resp.text.splitlines():
+            line = line.strip()
+            low = line.lower()
+            if not line or "error" in low or "api count exceeded" in low:
+                continue
+            h = clean_hostname(line)
+            if h:
+                found.add(h)
+        _cache_put(ip, found)  # cache even an empty result to avoid re-querying
     return found
 
 # --------------------------------------------------------------------------- #
@@ -239,7 +286,7 @@ def write_results(target: str, results: set[str]) -> str:
 # --------------------------------------------------------------------------- #
 class Job:
     __slots__ = ("id", "target", "kind", "use_external", "status", "total",
-                 "processed", "found", "error", "filename", "created",
+                 "processed", "found", "error", "warning", "filename", "created",
                  "started", "finished")
 
     def __init__(self, job_id: str, target: str, kind: str, use_external: bool):
@@ -252,6 +299,7 @@ class Job:
         self.processed = 0
         self.found = 0
         self.error: Optional[str] = None
+        self.warning: Optional[str] = None
         self.filename: Optional[str] = None
         self.created = time.time()
         self.started: Optional[float] = None
@@ -263,7 +311,7 @@ class Job:
             "job_id": self.id, "target": self.target, "kind": self.kind,
             "status": self.status, "total": self.total, "processed": self.processed,
             "found": self.found, "progress": pct, "filename": self.filename,
-            "error": self.error, "external_api": self.use_external,
+            "error": self.error, "warning": self.warning, "external_api": self.use_external,
             "created": self.created, "started": self.started, "finished": self.finished,
         }
 
@@ -308,7 +356,10 @@ async def run_scan(job: Job) -> None:
         for ip in ips:
             queue.put_nowait(ip)
 
+        rate_limited = False  # set once the external API reports quota exhausted
+
         async def worker() -> None:
+            nonlocal rate_limited
             while True:
                 try:
                     ip = queue.get_nowait()
@@ -316,8 +367,13 @@ async def run_scan(job: Job) -> None:
                     return
                 try:
                     hs = await ptr_lookup(ip, resolver)
-                    if job.use_external and client is not None:
-                        hs |= await external_lookup(ip, client, ext_sem)
+                    if job.use_external and client is not None and not rate_limited:
+                        try:
+                            hs |= await external_lookup(ip, client, ext_sem)
+                        except ExternalRateLimited:
+                            # Stop hammering a quota that's already exhausted;
+                            # remaining IPs still get their PTR lookup below.
+                            rate_limited = True
                     if hs:
                         results.update(hs)
                         job.found = len(results)
@@ -326,6 +382,14 @@ async def run_scan(job: Job) -> None:
 
         pool = min(DNS_CONCURRENCY, max(1, len(ips)))
         await asyncio.gather(*(worker() for _ in range(pool)))
+
+        if rate_limited:
+            job.warning = (
+                "External reverse-IP API rate limit reached — the free tier allows "
+                "only ~50 lookups/day, so results are incomplete. PTR (DNS) results "
+                "are unaffected. Add an API key/membership, scan a smaller range, or "
+                "disable the external API for accurate repeat scans."
+            )
 
         job.filename = write_results(job.target, results)
         job.found = len(results)

@@ -120,6 +120,26 @@ Scan results are saved to `/var/www/recon/results/*.txt`.
 
 ---
 
+## Troubleshooting: "the first scan works, later scans return 0"
+
+This is almost always the **external API** option, not a DNS problem.
+
+- The default external provider (hackertarget) free tier allows only **~50 lookups/day** per source IP. A single `/24` needs 254 lookups, so the first scan drains the quota and every scan after it is rate-limited.
+- The app now **detects this and shows a warning** on the scan ("External reverse-IP API rate limit reached …") instead of silently reporting `0`. It also **caches** successful per-IP results, so repeating a scan reuses them without spending more quota, and stops hammering the API once the quota is gone.
+
+What to do:
+
+- For large ranges, **leave "external API" off** — PTR (reverse DNS) is unlimited. Note that some ranges (e.g. Cloudflare `172.67.x` / `104.26.x`) legitimately have no useful PTR records, so `0` there is correct.
+- To use the external provider at scale, get a hackertarget membership/API key and point `RECON_EXTERNAL_API_URL` at the keyed endpoint, or scan only a few IPs at a time.
+
+A regression test for this behavior lives in [test_ratelimit.py](test_ratelimit.py):
+
+```bash
+python test_ratelimit.py    # simulates the quota; asserts warning + cache reuse
+```
+
+---
+
 ## Legal
 
 Only run reverse-IP lookups against infrastructure you own or are explicitly
