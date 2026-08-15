@@ -22,6 +22,7 @@ import ipaddress
 import os
 import re
 import secrets
+import ssl
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -40,6 +41,15 @@ try:
     import httpx  # optional: only needed for the external API fallback
 except ImportError:
     httpx = None
+
+try:
+    # Used to parse the DER certificate we grab from a target IP. Without CA
+    # validation stdlib ssl.getpeercert() returns {}, so we need a real parser.
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+except ImportError:
+    x509 = None
+    NameOID = None
 
 # --------------------------------------------------------------------------- #
 # Configuration - everything comes from environment variables so no secret
@@ -73,6 +83,17 @@ EXTERNAL_API_CONCURRENCY = int(_env("RECON_EXTERNAL_API_CONCURRENCY", "3"))
 # is stable minute-to-minute, so caching lets a repeat scan reuse results
 # WITHOUT spending more of the tiny free-tier daily quota. 0 disables it.
 EXTERNAL_API_CACHE_MAX = int(_env("RECON_EXTERNAL_API_CACHE_MAX", "2000"))
+
+# API-free reverse-IP discovery (default ON): connect to each IP's TLS port(s)
+# and harvest hostnames from the certificate's SAN/CN. Unlike the external API
+# this has NO quota and talks ONLY to the target host. Because we send no SNI,
+# a shared/SNI host returns just its default cert, so coverage there is partial
+# — but everything it finds is real, and it needs no third-party service.
+ENABLE_TLS_CERT = _env("RECON_ENABLE_TLS_CERT", "true").lower() in ("1", "true", "yes")
+TLS_CERT_PORTS = [int(p) for p in _env("RECON_TLS_CERT_PORTS", "443").split(",")
+                  if p.strip().isdigit()]
+TLS_CERT_TIMEOUT = float(_env("RECON_TLS_CERT_TIMEOUT", "4.0"))
+TLS_CERT_CONCURRENCY = int(_env("RECON_TLS_CERT_CONCURRENCY", str(DNS_CONCURRENCY)))
 
 MAX_INPUT_LEN = 255
 MAX_JOBS_RETAINED = 200  # trim the in-memory job table to bound memory
@@ -253,6 +274,86 @@ async def external_lookup(ip: str, client, sem: asyncio.Semaphore) -> set[str]:
     return found
 
 # --------------------------------------------------------------------------- #
+# API-free TLS-certificate discovery
+#
+# Reading the certificate an IP presents is a genuine reverse-IP signal that
+# needs no third-party API and no quota: the SAN/CN fields list the hostname(s)
+# the server is provisioned for. We connect with NO SNI and NO validation (so
+# self-signed / expired certs are still read), then parse the DER ourselves.
+# Limitation: on SNI-based shared hosting a bare grab yields only the default
+# cert, and CDN/WAF front IPs (e.g. Cloudflare) return an edge cert — partial
+# coverage, but every hostname it returns is real.
+# --------------------------------------------------------------------------- #
+def _names_from_cert_der(der: bytes) -> set[str]:
+    """Extract normalised hostnames from a DER-encoded X.509 cert (SAN + CN)."""
+    names: set[str] = set()
+    if not der or x509 is None:
+        return names
+    try:
+        cert = x509.load_der_x509_certificate(der)
+    except Exception:
+        return names
+    raw: list[str] = []
+    try:
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        raw.extend(san.get_values_for_type(x509.DNSName))
+    except x509.ExtensionNotFound:
+        pass
+    except Exception:
+        pass
+    try:
+        for attr in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME):
+            if isinstance(attr.value, str):
+                raw.append(attr.value)
+    except Exception:
+        pass
+    for name in raw:
+        if name.startswith("*."):
+            name = name[2:]  # wildcard cert -> keep the base domain (a real name)
+        h = clean_hostname(name)
+        if h:
+            names.add(h)
+    return names
+
+
+async def _grab_cert_der(ip: str, port: int, timeout: float) -> Optional[bytes]:
+    """Open a TLS connection (no SNI, no verification) and return the peer DER cert."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    writer = None
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(ip, port, ssl=ctx, server_hostname=""),
+            timeout=timeout,
+        )
+        ssl_obj = writer.get_extra_info("ssl_object")
+        return ssl_obj.getpeercert(binary_form=True) if ssl_obj else None
+    except Exception:
+        return None  # closed port / handshake failure / timeout -> no data
+    finally:
+        if writer is not None:
+            try:
+                writer.close()
+                await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+            except Exception:
+                pass
+
+
+async def cert_lookup(ip: str, sem: asyncio.Semaphore) -> set[str]:
+    """Harvest hostnames from the TLS cert(s) an IP presents across TLS_CERT_PORTS."""
+    found: set[str] = set()
+    if x509 is None or not TLS_CERT_PORTS:
+        return found
+    for port in TLS_CERT_PORTS:
+        async with sem:
+            der = await _grab_cert_der(ip, port, TLS_CERT_TIMEOUT)
+        if der:
+            found |= _names_from_cert_der(der)
+    return found
+
+
+# --------------------------------------------------------------------------- #
 # Result persistence
 # --------------------------------------------------------------------------- #
 _FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.txt$")
@@ -351,6 +452,7 @@ async def run_scan(job: Job) -> None:
                 follow_redirects=True,
             )
         ext_sem = asyncio.Semaphore(EXTERNAL_API_CONCURRENCY)
+        cert_sem = asyncio.Semaphore(max(1, TLS_CERT_CONCURRENCY))
 
         queue: asyncio.Queue[str] = asyncio.Queue()
         for ip in ips:
@@ -374,6 +476,9 @@ async def run_scan(job: Job) -> None:
                             # Stop hammering a quota that's already exhausted;
                             # remaining IPs still get their PTR lookup below.
                             rate_limited = True
+                    if ENABLE_TLS_CERT:
+                        # API-free: read the cert straight off the host (no quota).
+                        hs |= await cert_lookup(ip, cert_sem)
                     if hs:
                         results.update(hs)
                         job.found = len(results)

@@ -167,7 +167,8 @@
           <button class="btn" id="run" onclick="runScan()">RUN ANALYSIS</button>
         </div>
         <div class="hint">e.g. <b>192.168.1.0/24</b> · <b>8.8.8.8</b> · <b>example.com</b><br>
-          <b>external API</b> uses a free third-party service capped at ~50 lookups/day — enough for a few IPs, not a whole /24. PTR (default) is unlimited.</div>
+          Every scan does <b>PTR (reverse DNS)</b> + <b>TLS certificate</b> discovery — both unlimited and API-free.<br>
+          <b>external API</b> is an optional extra source using a free third-party service capped at ~50 lookups/day — enough for a few IPs, not a whole /24.</div>
         <div class="job" id="job">
           <div class="meta">
             <span>status <span class="badge" id="j-status">—</span></span>
